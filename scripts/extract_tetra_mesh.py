@@ -56,6 +56,7 @@ if __name__ == '__main__':
     tetra_command = " ".join([
         # "python", "2d-gaussian-splatting/extract_mesh.py",
         "python", "2d-gaussian-splatting/extract_mesh_adaptive_tsdf.py",
+        #"python", "2d-gaussian-splatting/extract_mesh_diff.py",
         "--source_path", args.mast3r_scene,
         "--model_path", args.model_path,
         "--iteration", str(iteration_to_load_for_tetra),

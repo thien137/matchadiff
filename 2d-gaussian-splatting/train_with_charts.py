@@ -472,6 +472,21 @@ def training(
             ).mean()
             total_regularization_loss = total_regularization_loss + anisotropy_loss
         
+        # Mesh regularization
+        # if iteration % use_chart_view_every_n_iter == 0:
+        #     # Mesh regularization
+        #     print("[INFO] Extracting mesh...")
+        #     from extract_mesh_diff import extract_mesh
+        #     verts, faces, rgbs = extract_mesh(dataset=dataset,
+        #                                       pipeline=pipe, 
+        #                                       filter_mesh=args.filter_mesh, 
+        #                                       texture_mesh=True, 
+        #                                       downsample_ratio=args.downsample_ratio,
+        #                                       gaussian_flatness=args.gaussian_flatness,
+        #                                     )
+        #     import nvdiffrast.torch as dr 
+        #     glctx = dr.RasterizeGLContext()
+            
         total_loss = total_loss + total_regularization_loss
         
         # ===================================================================================

@@ -120,7 +120,145 @@ if __name__ == "__main__":
                 image_width=scene_camera.image_width,
             ))
         cameras_wrapper = CamerasWrapper(gs_cameras)
+
+    # Extract the mesh and save
+    # meshes = []
+    # depth_truncs = []
+
+    # for factor in multires_factors:
+    #     print(f'\nExtracting mesh with factor {factor}...')
+    #     depth_trunc = (gaussExtractor.radius * factor)
+    #     voxel_size = depth_trunc / args.mesh_res
+    #     sdf_trunc = 5.0 * voxel_size
+
+    #     # --- Use the new differentiable extract_mesh_bounded ---
+    #     verts, faces, colors = gaussExtractor.extract_mesh_bounded_differentiable(
+    #         voxel_size=voxel_size,
+    #         sdf_trunc=sdf_trunc,
+    #         depth_trunc=depth_trunc
+    #     )
+
+    #     # After getting verts, faces, colors
+    #     if verts is None or faces is None or colors is None:
+    #         raise ValueError("One of verts, faces, or colors is None!")
+
+    #     if verts.numel() == 0 or faces.numel() == 0:
+    #         print("[Warning] Empty verts or faces. Skipping mesh at this resolution.")
+    #         continue  # move to next mesh
+
+    #     if colors.numel() == 0 or colors.shape[0] != verts.shape[0] or colors.shape[1] != 3:
+    #         print("[Warning] Colors invalid or mismatch with verts. Using dummy white colors.")
+    #         colors = torch.ones_like(verts, device=verts.device)
+
+    #     verts = verts.float()
+    #     faces = faces.long()
+    #     colors = colors.float()
+
+    #     from pytorch3d.structures import Meshes
+    #     from pytorch3d.renderer import TexturesVertex
+
+    #     mesh = Meshes(
+    #         verts=[verts],
+    #         faces=[faces],
+    #         textures=TexturesVertex(verts_features=[colors])
+    #     )
+
+    #     meshes.append(mesh)
+    #     depth_truncs.append(depth_trunc)
+
+    #     print(f'Mesh extracted with depth truncation {depth_trunc} and voxel size {voxel_size}.')
+
+    # save_dir = os.path.join(train_dir, "multires_meshes")
+    # os.makedirs(save_dir, exist_ok=True)
+
+    # for idx, mesh in enumerate(meshes):
+    #     verts = mesh.verts_packed()  # (V, 3)
+    #     faces = mesh.faces_packed()  # (F, 3)
+    #     vert_colors = mesh.textures.verts_features_packed()  # (V, 3)
+
+    #     # Create Open3D mesh
+    #     mesh_o3d = o3d.geometry.TriangleMesh()
+    #     mesh_o3d.vertices = o3d.utility.Vector3dVector(verts.detach().cpu().numpy())
+    #     mesh_o3d.triangles = o3d.utility.Vector3iVector(faces.detach().cpu().numpy())
+    #     mesh_o3d.vertex_colors = o3d.utility.Vector3dVector(vert_colors.detach().cpu().numpy())
+
+    #     # Save to file
+    #     filename = f"mesh_factor{multires_factors[idx]:.2f}.ply"
+    #     filepath = os.path.join(save_dir, filename)
+    #     o3d.io.write_triangle_mesh(filepath, mesh_o3d)
+    #     print(f"Saved mesh for factor {multires_factors[idx]:.2f} at {filepath}")
         
+    # # --- Merge multi-resolution meshes ---
+    # p3d_meshes = []
+    # device = 'cuda'
+
+    # print("\n=== Merging multi-resolution meshes ===")
+    # for i_mesh, (depth_trunc, mesh) in enumerate(zip(depth_truncs, meshes)):
+    #     print(f"Processing mesh with depth truncation {depth_trunc}...")
+
+    #     verts = mesh.verts_packed()
+    #     faces = mesh.faces_packed()
+    #     vert_colors = mesh.textures.verts_features_packed()
+
+    #     p3d_mesh = Meshes(
+    #         verts=[verts],
+    #         faces=[faces],
+    #         textures=TexturesVertex([vert_colors])
+    #     )
+
+    #     empty_mesh = False
+
+    #     # --- Face pruning (optional) ---
+    #     if i_mesh > 0:
+    #         projections = cameras_wrapper.project_points(verts.view(1, -1, 3))  # (n_cameras, n_verts, 2)
+    #         height, width = cameras_wrapper.gs_cameras[0].image_height, cameras_wrapper.gs_cameras[0].image_width
+    #         factors = torch.tensor([[[-width / min(height, width), -height / min(height, width)]]], device=projections.device)
+    #         projections = projections / factors
+
+    #         visible_mask = (projections[..., 0] > -1.0) & (projections[..., 0] < 1.0) & \
+    #                     (projections[..., 1] > -1.0) & (projections[..., 1] < 1.0)
+
+    #         depths = cameras_wrapper.transform_points_world_to_view(verts.view(1, -1, 3))[..., 2]
+    #         close_verts = (depths < depth_truncs[i_mesh - 1])
+
+    #         non_valid_verts = (visible_mask & close_verts).any(dim=0)  # (n_verts)
+    #         non_valid_faces = non_valid_verts[faces].all(dim=-1)
+
+    #         try:
+    #             p3d_mesh = remove_faces_from_single_mesh(p3d_mesh, faces_to_keep_mask=~non_valid_faces)
+    #         except:
+    #             print(f"Error removing faces for mesh {i_mesh}. Empty mesh?")
+    #             empty_mesh = True
+
+    #     if not empty_mesh:
+    #         p3d_meshes.append(p3d_mesh)
+
+    # # --- Merge everything ---
+    # from pytorch3d.structures import join_meshes_as_scene
+
+    # full_mesh = join_meshes_as_scene(p3d_meshes)
+    # verts = full_mesh.verts_packed()
+    # faces = full_mesh.faces_packed()
+    # vert_colors = full_mesh.textures.verts_features_packed()
+
+    # # --- Save as Open3D mesh (for visualization) ---
+    # import open3d as o3d
+    # import numpy as np
+
+    # mesh = o3d.geometry.TriangleMesh()
+    # mesh.vertices = o3d.utility.Vector3dVector(verts.detach().cpu().numpy())
+    # mesh.triangles = o3d.utility.Vector3iVector(faces.detach().cpu().numpy())
+    # mesh.vertex_colors = o3d.utility.Vector3dVector(vert_colors.detach().cpu().numpy())
+
+    # name = 'multires_tsdf.ply'
+    # o3d.io.write_triangle_mesh(os.path.join(train_dir, name), mesh)
+    # print("Mesh saved at {}".format(os.path.join(train_dir, name)))
+
+    # # --- Post-process the mesh and save ---
+    # mesh_post = post_process_mesh(mesh, cluster_to_keep=args.num_cluster)
+    # o3d.io.write_triangle_mesh(os.path.join(train_dir, name.replace('.ply', '_post.ply')), mesh_post)
+    # print("Mesh post processed saved at {}".format(os.path.join(train_dir, name.replace('.ply', '_post.ply'))))
+
         # extract the mesh and save
         for factor in multires_factors:
             print(f'\nExtracting mesh with factor {factor}...')

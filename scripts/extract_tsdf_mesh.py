@@ -37,14 +37,14 @@ if __name__ == '__main__':
     
     # Define command
     tsdf_command = " ".join([
-        "python", "2d-gaussian-splatting/render_multires.py",
+        "python", "2d-gaussian-splatting/render.py",
         "--source_path", args.mast3r_scene,
         "--model_path", args.model_path,
-        "--output_dir", args.output_path,
+        #"--output_dir", args.output_path,
         "--depth_ratio", str(config['depth_ratio']),
         "--num_cluster", str(config['num_cluster']),
         "--mesh_res", str(config['mesh_res']),
-        "--multires_factors", *[str(factor) for factor in config['multires_factors']],
+        #"--multires_factors", *[str(factor) for factor in config['multires_factors']],
         "--skip_train",
         "--skip_test",
     ])

@@ -44,7 +44,6 @@ def get_cameras_spatial_extent(views, device):
     return nerf_cameras.get_spatial_extent()
 
 
-@torch.no_grad()
 def get_dilated_depth(view, depth, dilation_pixels, rgb=None, max_dilation=1e8):
     """
     Get dilated depth from a depth map.
@@ -82,11 +81,7 @@ def get_dilated_depth(view, depth, dilation_pixels, rgb=None, max_dilation=1e8):
     
     # Get 3D points from depth map
     depth_view = depth.squeeze()  # (H, W)
-    if False:
-        # Depth to points function from 2DGS leads to imprecision in the backprojection.
-        pts = depths_to_points_parallel(depth_view[None], [view]).view(*depth_view.shape, 3)  # (H, W, 3)
-    else:
-        pts = nerf_cameras.backproject_depth(cam_idx=0, depth=depth_view).view(*depth_view.shape, 3)
+    pts = nerf_cameras.backproject_depth(cam_idx=0, depth=depth_view).view(*depth_view.shape, 3)
     rgb_channels_first = False
     if rgb is not None:
         if rgb.shape[0] == 3:
@@ -135,7 +130,6 @@ def get_dilated_depth(view, depth, dilation_pixels, rgb=None, max_dilation=1e8):
     return dilated_depth.view(*depth.shape), dilated_rgb.view(*rgb.shape)
 
 
-@torch.no_grad()
 def evaluate_tsdf(points, views, gaussians:GaussianModel, pipeline, background, return_color=False, 
                   truncation_margin=0.005, interpolate_depth=True, interpolation_mode='bilinear', weight_interpolation_by_depth_gradient=False,
                   use_dilated_depth=False, use_sdf_tolerance=False, use_unbiased_tsdf=False,
@@ -214,7 +208,6 @@ def evaluate_tsdf(points, views, gaussians:GaussianModel, pipeline, background, 
     return tsdf
 
 
-@torch.no_grad()
 def marching_tetrahedra_with_binary_search(
     model_path : str, 
     name : str, 
@@ -372,12 +365,6 @@ def marching_tetrahedra_with_binary_search(
             mesh.update_faces(face_mask)
         
         mesh.export(os.path.join(render_path, f"tetra_mesh_binary_search_{step}.ply"))
-
-    # linear interpolation
-    # right_sdf *= -1
-    # points = (left_points * left_sdf + right_points * right_sdf) / (left_sdf + right_sdf)
-    # mesh = trimesh.Trimesh(vertices=points.cpu().numpy(), faces=faces)
-    # mesh.export(os.path.join(render_path, f"mesh_binary_search_interp.ply"))
     
 
 def extract_mesh(
@@ -407,69 +394,68 @@ def extract_mesh(
     n_interpolated_cameras_for_each_neighbor : int = 10,
     dense_data_path : str = None,
 ):
-    with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree)
-        print(("Dataset: ", dataset.source_path, dataset.model_path))
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
-        
-        bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
-        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-        
-        # Dense data
-        if dense_data_path is not None:
-            print(f"[INFO] Loading dense supervision data from: {dense_data_path}")
-            dense_dataset = copy.deepcopy(dataset)
-            dense_dataset.source_path = dense_data_path
-            dense_dataset.model_path = os.path.join(dataset.model_path, 'dense_data')
-            dense_gaussians = GaussianModel(dataset.sh_degree)
-            dense_scene = Scene(dense_dataset, dense_gaussians, shuffle=False)
-            _cams = dense_scene.getTrainCameras()
-            print(f"          > Number of dense cameras: {len(_cams)}")
-            print(f"          > Pseudo-views interpolation will be disabled because dense supervision is provided.")
-            interpolate_cameras = False
-        else:
-            _cams = scene.getTrainCameras()
-        
-        if interpolate_cameras:
-            print(f"[INFO] Pseudo-views interpolated between training views will be used for TSDF integration.")
-            print(f"          > Interpolating between {n_neighbors_to_interpolate} neighbors for each camera.")
-            print(f"          > Interpolating {n_interpolated_cameras_for_each_neighbor} views for each neighbor.")
-            cams = get_cameras_interpolated_between_neighbors(
-                cameras=_cams, 
-                n_neighbors_to_interpolate=n_neighbors_to_interpolate, 
-                n_interpolated_cameras_for_each_neighbor=n_interpolated_cameras_for_each_neighbor
-            )
-        else:
-            cams = _cams
-        
-        marching_tetrahedra_with_binary_search(
-            model_path=dataset.model_path, 
-            name="test", 
-            iteration=iteration, 
-            views=cams, 
-            gaussians=gaussians, 
-            pipeline=pipeline, 
-            background=background, 
-            filter_mesh=filter_mesh, 
-            texture_mesh=texture_mesh, 
-            downsample_ratio=downsample_ratio,
-            gaussian_flatness=gaussian_flatness,
-            output_dir=output_dir,
-            truncation_margin=truncation_margin,
-            interpolate_depth=interpolate_depth,
-            interpolation_mode=interpolation_mode,
-            weight_interpolation_by_depth_gradient=weight_interpolation_by_depth_gradient,
-            use_dilated_depth=use_dilated_depth,
-            use_sdf_tolerance=use_sdf_tolerance,
-            use_unbiased_tsdf=use_unbiased_tsdf,
-            use_binary_opacity=use_binary_opacity,
-            filter_with_depth_gradient=filter_with_depth_gradient,
-            filter_with_normal_consistency=filter_with_normal_consistency,
-            weight_by_softmax=weight_by_softmax,
-            weight_by_normal_consistency=weight_by_normal_consistency,
-            softmax_temperature=softmax_temperature,
-            save_cells=False,
+    gaussians = GaussianModel(dataset.sh_degree)
+    print(("Dataset: ", dataset.source_path, dataset.model_path))
+    scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+    
+    bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    
+    # Dense data
+    if dense_data_path is not None:
+        print(f"[INFO] Loading dense supervision data from: {dense_data_path}")
+        dense_dataset = copy.deepcopy(dataset)
+        dense_dataset.source_path = dense_data_path
+        dense_dataset.model_path = os.path.join(dataset.model_path, 'dense_data')
+        dense_gaussians = GaussianModel(dataset.sh_degree)
+        dense_scene = Scene(dense_dataset, dense_gaussians, shuffle=False)
+        _cams = dense_scene.getTrainCameras()
+        print(f"          > Number of dense cameras: {len(_cams)}")
+        print(f"          > Pseudo-views interpolation will be disabled because dense supervision is provided.")
+        interpolate_cameras = False
+    else:
+        _cams = scene.getTrainCameras()
+    
+    if interpolate_cameras:
+        print(f"[INFO] Pseudo-views interpolated between training views will be used for TSDF integration.")
+        print(f"          > Interpolating between {n_neighbors_to_interpolate} neighbors for each camera.")
+        print(f"          > Interpolating {n_interpolated_cameras_for_each_neighbor} views for each neighbor.")
+        cams = get_cameras_interpolated_between_neighbors(
+            cameras=_cams, 
+            n_neighbors_to_interpolate=n_neighbors_to_interpolate, 
+            n_interpolated_cameras_for_each_neighbor=n_interpolated_cameras_for_each_neighbor
         )
+    else:
+        cams = _cams
+    
+    marching_tetrahedra_with_binary_search(
+        model_path=dataset.model_path, 
+        name="test", 
+        iteration=iteration, 
+        views=cams, 
+        gaussians=gaussians, 
+        pipeline=pipeline, 
+        background=background, 
+        filter_mesh=filter_mesh, 
+        texture_mesh=texture_mesh, 
+        downsample_ratio=downsample_ratio,
+        gaussian_flatness=gaussian_flatness,
+        output_dir=output_dir,
+        truncation_margin=truncation_margin,
+        interpolate_depth=interpolate_depth,
+        interpolation_mode=interpolation_mode,
+        weight_interpolation_by_depth_gradient=weight_interpolation_by_depth_gradient,
+        use_dilated_depth=use_dilated_depth,
+        use_sdf_tolerance=use_sdf_tolerance,
+        use_unbiased_tsdf=use_unbiased_tsdf,
+        use_binary_opacity=use_binary_opacity,
+        filter_with_depth_gradient=filter_with_depth_gradient,
+        filter_with_normal_consistency=filter_with_normal_consistency,
+        weight_by_softmax=weight_by_softmax,
+        weight_by_normal_consistency=weight_by_normal_consistency,
+        softmax_temperature=softmax_temperature,
+        save_cells=False,
+    )
 
 
 if __name__ == "__main__":
@@ -544,3 +530,7 @@ if __name__ == "__main__":
         n_interpolated_cameras_for_each_neighbor=args.n_interpolated_cameras_for_each_neighbor,
         dense_data_path=args.dense_data_path,
     )
+    
+    #mesh = trimesh.Trimesh(vertices=points.cpu().numpy(), faces=faces.cpu().numpy(), vertex_colors=rgbs.cpu().numpy())
+    #mesh.export(os.path.join(args.output_dir, "mesh.ply"))
+    #print(f"Mesh saved to {os.path.join(args.output_dir, 'mesh.ply')}")
