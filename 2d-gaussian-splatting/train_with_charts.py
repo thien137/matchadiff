@@ -473,21 +473,55 @@ def training(
             total_regularization_loss = total_regularization_loss + anisotropy_loss
         
         # Mesh regularization
-        # if iteration % use_chart_view_every_n_iter == 0:
-        #     # Mesh regularization
-        #     print("[INFO] Extracting mesh...")
-        #     from extract_mesh_diff import extract_mesh
-        #     verts, faces, rgbs = extract_mesh(dataset=dataset,
-        #                                       pipeline=pipe, 
-        #                                       filter_mesh=args.filter_mesh, 
-        #                                       texture_mesh=True, 
-        #                                       downsample_ratio=args.downsample_ratio,
-        #                                       gaussian_flatness=args.gaussian_flatness,
-        #                                     )
-        #     import nvdiffrast.torch as dr 
-        #     glctx = dr.RasterizeGLContext()
+        mesh_render_loss = 0
+        if True or iteration > 6900 and iteration % 5 == 0:
+            # Mesh regularization
+            print("[INFO] Extracting mesh...")
+            device = 'cuda'
+            from utils.mesh_utils import GaussianExtractor
+            gaussExtractor = GaussianExtractor(gaussians, render, pipe, bg_color=bg_color)    
+            gaussExtractor.reconstruction(scene.getTrainCameras())
+            verts, faces, vert_colors = gaussExtractor.extract_mesh_unbounded2(resolution=512)
+            from matcha.dm_scene.meshes import Meshes, TexturesVertex
+            p3d_mesh = Meshes(
+                verts=[verts.float().to(device)], 
+                faces=[faces.long().to(device)],
+                textures=TexturesVertex([vert_colors.float().to(device)]),
+            )
+            scene_cameras = scene.getTrainCameras()
+            from matcha.dm_scene.cameras import CamerasWrapper, GSCamera
+            gs_cameras = []
+            for scene_camera in scene_cameras:
+                gs_cameras.append(GSCamera(
+                    colmap_id=scene_camera.colmap_id,
+                    R=scene_camera.R,
+                    T=scene_camera.T,
+                    FoVx=scene_camera.FoVx,
+                    FoVy=scene_camera.FoVy,
+                    image=scene_camera.original_image,
+                    gt_alpha_mask=scene_camera.gt_alpha_mask,
+                    image_name=scene_camera.image_name,
+                    uid=scene_camera.uid,
+                    data_device=scene_camera.data_device,
+                    image_height=scene_camera.image_height,
+                    image_width=scene_camera.image_width,
+                ))
+            cameras_wrapper = CamerasWrapper(gs_cameras)
             
-        total_loss = total_loss + total_regularization_loss
+            from matcha.dm_scene.meshes import render_mesh_with_pytorch3d
+            result = render_mesh_with_pytorch3d(p3d_mesh, cameras_wrapper, 0)
+            import numpy as np
+            aname = f"zzzzz{iteration}" + 'fuse_unbounded.ply'
+            print("image saved at {}".format(os.path.join(os.getcwd(), aname.replace('.ply', '_rgb.png'))))
+            rgb_image = result['rgb']
+            from PIL import Image
+            Image.fromarray((rgb_image.detach().cpu().numpy() * 255).astype(np.uint8)).save(os.path.join(os.getcwd(), aname.replace('.ply', '_rgb.png')))
+            result_image = result['rgb']
+            gt_image = scene_cameras[0].original_image.permute(1, 2, 0)
+            mesh_render_loss = torch.mean((result_image - gt_image) ** 2)
+            total_loss = mesh_render_loss
+        else:  
+            total_loss = total_loss + total_regularization_loss
         
         # ===================================================================================
 

@@ -119,17 +119,25 @@ if __name__ == "__main__":
                 image_width=scene_camera.image_width,
             ))
         cameras_wrapper = CamerasWrapper(gs_cameras)
-
+        
         # extract the mesh and save
         for factor in multires_factors:
-            print(f'\nExtracting mesh with factor {factor}...')
-            depth_trunc = (gaussExtractor.radius * factor)
-            voxel_size = depth_trunc / args.mesh_res
-            sdf_trunc = 5.0 * voxel_size
-            mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc)
-            meshes.append(mesh)
-            depth_truncs.append(depth_trunc)
-            print(f'Mesh extracted with depth truncation {depth_trunc} and voxel size {voxel_size}.')
+            if args.unbounded:
+                print(f'\nExtracting unbounded mesh with factor {factor}...')
+                depth_trunc = (gaussExtractor.radius * factor)
+                mesh = gaussExtractor.extract_mesh_unbounded(resolution=args.mesh_res, factor=factor)
+                meshes.append(mesh)
+                depth_truncs.append(depth_trunc)
+                print(f'Mesh extracted.')
+            else: 
+                print(f'\nExtracting bounded mesh with factor {factor}...')
+                depth_trunc = (gaussExtractor.radius * factor)
+                voxel_size = depth_trunc / args.mesh_res
+                sdf_trunc = 5.0 * voxel_size
+                mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc)
+                meshes.append(mesh)
+                depth_truncs.append(depth_trunc)
+                print(f'Mesh extracted with depth truncation {depth_trunc} and voxel size {voxel_size}.')
         
         p3d_meshes = []
         device = 'cuda'
@@ -138,6 +146,7 @@ if __name__ == "__main__":
         print("\n===Merging multi-resolution meshes===")
         previous_pix_to_face = None
         current_pix_to_face = None
+        
         for i_mesh, (depth_trunc, mesh) in enumerate(zip(depth_truncs, meshes)):
             print(f"Processing mesh with depth truncation {depth_trunc}...")
             
@@ -151,9 +160,6 @@ if __name__ == "__main__":
                 textures=TexturesVertex([vert_colors]),
             )
             empty_mesh = False
-            
-            # Identify which faces from lower resolutions are necessary to keep
-            necessary_faces = torch.zeros(faces.shape[0], dtype=torch.bool, device=device)
             
             # Removing faces in the field of view of the cameras, but with depth below the truncation threshold
             if i_mesh > 0:
@@ -176,23 +182,31 @@ if __name__ == "__main__":
                     p3d_mesh = remove_faces_from_single_mesh(p3d_mesh, faces_to_keep_mask=(~non_valid_faces) | necessary_faces)
                 except:
                     print(f"Error removing faces for mesh {i_mesh}. Empty mesh?")
-                    empty_mesh = True
+                    empty_mesh = True    
                     
             if not empty_mesh:
                 p3d_meshes.append(p3d_mesh)
 
         from pytorch3d.structures import join_meshes_as_scene
+        print(f'\nJoining meshes...')
+        print(f'Number of meshes: {len(p3d_meshes)}')
+        for mesh in p3d_meshes:
+            print("Mesh shape:")
+            print(mesh.verts_packed().shape)
+            print(mesh.faces_packed().shape)
+            print(mesh.textures.verts_features_packed().shape)
         full_mesh = join_meshes_as_scene(p3d_meshes)
         verts = full_mesh.verts_packed()
         faces = full_mesh.faces_packed()
         vert_colors = full_mesh.textures.verts_features_packed()
+        
         # Creates an open3d mesh from the pytorch3d mesh
         mesh = o3d.geometry.TriangleMesh()
         mesh.vertices = o3d.utility.Vector3dVector(verts.cpu().numpy())
         mesh.triangles = o3d.utility.Vector3iVector(faces.cpu().numpy())
         mesh.vertex_colors = o3d.utility.Vector3dVector(vert_colors.cpu().numpy())
         
-        name = 'multires_tsdf.ply'
+        name = 'multires_tsdf_unbounded.ply'
         o3d.io.write_triangle_mesh(os.path.join(train_dir, name), mesh)
         print("mesh saved at {}".format(os.path.join(train_dir, name)))
         # post-process the mesh and save, saving the largest N clusters

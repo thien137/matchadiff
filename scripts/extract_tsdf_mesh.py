@@ -44,6 +44,7 @@ if __name__ == '__main__':
         "--depth_ratio", str(config['depth_ratio']),
         "--num_cluster", str(config['num_cluster']),
         "--mesh_res", str(config['mesh_res']),
+        "--unbounded",
         #"--multires_factors", *[str(factor) for factor in config['multires_factors']],
         "--skip_train",
         "--skip_test",

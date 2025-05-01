@@ -120,9 +120,10 @@ class GaussianExtractor(object):
             normal = torch.nn.functional.normalize(render_pkg['rend_normal'], dim=0)
             depth = render_pkg['surf_depth']
             depth_normal = render_pkg['surf_normal']
-            self.rgbmaps.append(rgb.cpu())
-            self.depthmaps.append(depth.cpu())
-
+            self.rgbmaps.append(rgb)
+            self.depthmaps.append(depth)
+            print("RECONSTRUCTION",  rgb.requires_grad)
+            
         self.estimate_bounding_sphere()
 
     def estimate_bounding_sphere(self):
@@ -182,190 +183,34 @@ class GaussianExtractor(object):
 
         mesh = volume.extract_triangle_mesh()
         return mesh
-
-    def extract_mesh_bounded_differentiable(
-        self,
-        voxel_size=0.004,
-        sdf_trunc=0.02,
-        depth_trunc=3.0,
-        mask_background=True
-    ):
+    
+    def extract_mesh_unbounded2(self, resolution=1024, factor=1):
         """
-        Differentiable version of extract_mesh_bounded.
-        Returns verts, faces, colors.
+        Extract mesh from unbounded scene using factor to control volume extent.
         """
-        import torch
-        import torch.nn.functional as F
-        from tqdm import tqdm
-        from diso import DiffDMC
-        import numpy as np
-
-        device = 'cuda'
-
-        print("Running differentiable TSDF volume integration ...")
-        print(f'voxel_size: {voxel_size}')
-        print(f'sdf_trunc: {sdf_trunc}')
-        print(f'depth_trunc: {depth_trunc}')
-
-        # === Helper: Project points and compute SDF + RGB
-        def compute_sdf_perframe(i, points, depthmap, rgbmap, viewpoint_cam):
-            new_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1) @ viewpoint_cam.full_proj_transform
-            z = new_points[..., -1:]
-            pix_coords = (new_points[..., :2] / new_points[..., -1:])
-            mask_proj = ((pix_coords > -1.) & (pix_coords < 1.) & (z > 0)).all(dim=-1)
-
-            sampled_depth = F.grid_sample(
-                depthmap[None], pix_coords[None, None], mode='bilinear', padding_mode='border', align_corners=True
-            ).reshape(-1, 1)
-
-            sampled_rgb = F.grid_sample(
-                rgbmap[None], pix_coords[None, None], mode='bilinear', padding_mode='border', align_corners=True
-            ).reshape(3, -1).T
-
-            sdf = sampled_depth - z
-            return sdf, sampled_rgb, mask_proj
-
-        # === Helper: Marching cubes on bounded TSDF
-        def marching_cubes_diffdmc_bounded(tsdf_grid, voxel_size, min_xyz, level=0.0, device='cuda'):
-            Nx, Ny, Nz = tsdf_grid.shape
-            dmc = DiffDMC(dtype=torch.float32).to(device)
-
-            verts, faces = dmc(tsdf_grid, isovalue=level)
-
-            if verts.numel() == 0 or faces.numel() == 0:
-                print("[Warning] Marching cubes returned empty mesh.")
-                return verts.new_zeros((0,3)), faces.new_zeros((0,3))
-
-            scale_xyz = torch.tensor([Nx-1, Ny-1, Nz-1], device=verts.device)
-            verts = verts * scale_xyz
-            verts_world = min_xyz[None, :] + verts * voxel_size
-
-            return verts_world, faces
-
-        # === Compute bounding box
-        def get_bounds(viewpoint_stack):
-            all_positions = torch.stack([torch.tensor(view.T).float().to(device) for view in viewpoint_stack], dim=0)
-            center = all_positions.mean(dim=0)
-            extent = (all_positions.max(dim=0).values - all_positions.min(dim=0).values) * 1.5
-            min_xyz = center - extent / 2
-            max_xyz = center + extent / 2
-            return min_xyz, max_xyz
-
-        def compute_grid_size(bounds, voxel_size):
-            min_xyz, max_xyz = bounds
-            sizes = (max_xyz - min_xyz)
-            grid_size = torch.ceil(sizes / voxel_size).long()
-            return tuple(grid_size)
-
-        # === Build voxel grid
-        min_xyz, max_xyz = get_bounds(self.viewpoint_stack)
-        Nx, Ny, Nz = compute_grid_size((min_xyz, max_xyz), voxel_size)
-        print(f'Voxel grid size: {Nx} x {Ny} x {Nz}')
-
-        grid_x, grid_y, grid_z = torch.meshgrid(
-            torch.arange(Nx, device=device),
-            torch.arange(Ny, device=device),
-            torch.arange(Nz, device=device),
-            indexing='ij'
-        )
-        voxels = torch.stack([grid_x, grid_y, grid_z], dim=-1).float()
-        voxels_world = min_xyz[None, None, None, :] + voxels * voxel_size
-        voxels_flat = voxels_world.reshape(-1, 3)  # (N,3)
-
-        # === Initialize TSDF and color
-        tsdfs = torch.ones((voxels_flat.shape[0],), device=device)
-        rgbs = torch.zeros((voxels_flat.shape[0], 3), device=device)
-        weights = torch.ones_like(tsdfs)
-
-        # === Integrate from all views
-        for i, viewpoint_cam in enumerate(tqdm(self.viewpoint_stack, desc="TSDF integration progress")):
-            rgb = self.rgbmaps[i].to(device)
-            depth = self.depthmaps[i].to(device)
-
-            depth = depth.clone()
-            depth = depth.clamp(0.0, depth_trunc)
-
-            if mask_background and (viewpoint_cam.gt_alpha_mask is not None):
-                depth[viewpoint_cam.gt_alpha_mask < 0.5] = 0.0
-
-            sdf, rgb_sampled, mask_proj = compute_sdf_perframe(
-                i, voxels_flat, depthmap=depth, rgbmap=rgb, viewpoint_cam=viewpoint_cam
-            )
-
-            sdf = sdf.flatten()
-
-            mask_proj = mask_proj & (sdf > -sdf_trunc)
-
-            if mask_proj.sum() == 0:
-                continue
-
-            sdf_clamped = torch.clamp(sdf / sdf_trunc, min=-1.0, max=1.0)[mask_proj]
-
-            w = weights[mask_proj]
-            wp = w + 1
-
-            tsdfs[mask_proj] = (tsdfs[mask_proj] * w + sdf_clamped) / wp
-            rgbs[mask_proj] = (rgbs[mask_proj] * w[:, None] + rgb_sampled[mask_proj]) / wp[:, None]
-            weights[mask_proj] = wp
-
-        # === Reshape TSDF grid
-        tsdf_grid = tsdfs.view(Nx, Ny, Nz)
-        color_grid = rgbs.view(Nx, Ny, Nz, 3)
-
-        # === Run marching cubes
-        verts_world, faces = marching_cubes_diffdmc_bounded(
-            tsdf_grid=tsdf_grid,
-            voxel_size=voxel_size,
-            min_xyz=min_xyz,
-            level=0.0,
-            device=device
-        )
-
-        if verts_world.numel() == 0 or faces.numel() == 0:
-            return verts_world, faces, verts_world.new_zeros((0, 3))
-
-        # === Sample vertex colors
-        verts_idx = (verts_world - min_xyz[None, :]) / voxel_size
-        verts_idx = verts_idx.long()
-        verts_idx[:, 0] = verts_idx[:, 0].clamp(0, Nx-1)
-        verts_idx[:, 1] = verts_idx[:, 1].clamp(0, Ny-1)
-        verts_idx[:, 2] = verts_idx[:, 2].clamp(0, Nz-1)
-
-        sampled_colors = color_grid[
-            verts_idx[:,0],
-            verts_idx[:,1],
-            verts_idx[:,2]
-        ]
-
-        return verts_world, faces, sampled_colors
-        
-    def extract_mesh_unbounded_train_nvdiffrast(self, resolution=1024):
-        """
-        Returns verts, faces, and vertex_colors (all torch tensors) for use with NVDiffRast.
-        """
-
         def contract(x):
-            mag = torch.linalg.norm(x, ord=2, dim=-1, keepdim=True)
+            mag = torch.linalg.norm(x, ord=2, dim=-1)[..., None]
             return torch.where(mag < 1, x, (2 - (1 / mag)) * (x / mag))
 
         def uncontract(y):
-            mag = torch.linalg.norm(y, ord=2, dim=-1, keepdim=True)
+            mag = torch.linalg.norm(y, ord=2, dim=-1)[..., None]
             return torch.where(mag < 1, y, (1 / (2 - mag)) * (y / mag))
 
         def compute_sdf_perframe(i, points, depthmap, rgbmap, viewpoint_cam):
-            new_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1) @ viewpoint_cam.full_proj_transform
+            new_points = torch.cat([points, torch.ones_like(points[...,:1])], dim=-1) @ viewpoint_cam.full_proj_transform
             z = new_points[..., -1:]
             pix_coords = (new_points[..., :2] / new_points[..., -1:])
             mask_proj = ((pix_coords > -1.) & (pix_coords < 1.) & (z > 0)).all(dim=-1)
             sampled_depth = torch.nn.functional.grid_sample(
-                depthmap[None], pix_coords[None, None], mode='bilinear',
-                padding_mode='border', align_corners=True
+                depthmap[None], pix_coords[None, None], 
+                mode='bilinear', padding_mode='border', align_corners=True
             ).reshape(-1, 1)
             sampled_rgb = torch.nn.functional.grid_sample(
-                rgbmap[None], pix_coords[None, None], mode='bilinear',
-                padding_mode='border', align_corners=True
+                rgbmap[None], pix_coords[None, None], 
+                mode='bilinear', padding_mode='border', align_corners=True
             ).reshape(3, -1).T
-            sdf = sampled_depth - z
+            sdf = (sampled_depth - z)
+            print("SDF", depthmap.requires_grad, sampled_depth.requires_grad)
             return sdf, sampled_rgb, mask_proj
 
         def compute_unbounded_tsdf(samples, inv_contraction, voxel_size, return_rgb=False):
@@ -377,15 +222,15 @@ class GaussianExtractor(object):
             else:
                 sdf_trunc = 5 * voxel_size
 
-            tsdfs = torch.ones_like(samples[:, 0])
-            rgbs = torch.zeros((samples.shape[0], 3), device=samples.device)
-            weights = torch.ones_like(samples[:, 0])
+            tsdfs = torch.ones_like(samples[:, 0], device='cuda')
+            rgbs = torch.zeros((samples.shape[0], 3), device='cuda')
+            weights = torch.ones_like(samples[:, 0], device='cuda')
 
-            for i, viewpoint_cam in tqdm(enumerate(self.viewpoint_stack), desc="TSDF integration"):
+            for i, viewpoint_cam in tqdm(enumerate(self.viewpoint_stack), desc="TSDF integration progress"):
                 sdf, rgb, mask_proj = compute_sdf_perframe(
                     i, samples,
-                    depthmap=self.depthmaps[i].cuda(),
-                    rgbmap=self.rgbmaps[i].cuda(),
+                    depthmap=self.depthmaps[i],
+                    rgbmap=self.rgbmaps[i],
                     viewpoint_cam=viewpoint_cam,
                 )
                 sdf = sdf.flatten()
@@ -399,28 +244,32 @@ class GaussianExtractor(object):
 
             if return_rgb:
                 return tsdfs, rgbs
-
+            
+            
             return tsdfs
 
-        # Contract/normalize helpers
         normalize = lambda x: (x - self.center) / self.radius
         unnormalize = lambda x: (x * self.radius) + self.center
         inv_contraction = lambda x: unnormalize(uncontract(x))
 
-        # Settings
+        # Scale the voxel size according to the desired volume extent
         N = resolution
-        voxel_size = (self.radius * 2 / N)
-        print(f"Computing SDF grid @ {N}³, voxel size: {voxel_size}")
+        volume_extent = self.radius * 2 * factor
+        voxel_size = volume_extent / N
+
+        print(f"Computing sdf grid resolution {N} x {N} x {N}")
+        print(f"Define the voxel_size as {voxel_size:.6f}")
+
         sdf_function = lambda x: compute_unbounded_tsdf(x, inv_contraction, voxel_size)
 
-        # Compute bounding region
-        R = contract(normalize(self.gaussians.get_xyz)).norm(dim=-1).cpu().numpy()
-        R = min(np.quantile(R, 0.95) + 0.01, 1.9)
+        from utils.mcube_utils import marching_cubes_with_contraction
 
-        # Extract mesh via differentiable marching cubes
-        from utils.mcube_utils import marching_cubes_with_contraction_diffdmc
-        print("Extracting mesh...")
-        verts, faces = marching_cubes_with_contraction_diffdmc(
+        # Compute R for bounding box
+        R = contract(normalize(self.gaussians.get_xyz)).norm(dim=-1).detach().cpu().numpy()
+        R = np.quantile(R, q=0.95)
+        R = min(R + 0.01, 1.9) #* factor  # ← factor applied here
+        
+        verts, faces = marching_cubes_with_contraction(
             sdf=sdf_function,
             bounding_box_min=(-R, -R, -R),
             bounding_box_max=(R, R, R),
@@ -430,95 +279,103 @@ class GaussianExtractor(object):
             return_mesh=False,
         )
 
-        # Optionally compute RGBs
-        print("Texturing mesh with RGBs...")
-        _, rgbs = compute_unbounded_tsdf(verts, inv_contraction=None, voxel_size=voxel_size, return_rgb=True)
+        # Texture
+        torch.cuda.empty_cache()
+        print("texturing mesh ... ")
+        # TODO lets not care about colors?
+        with torch.no_grad():
+            _, rgbs = compute_unbounded_tsdf(
+                verts.float().cuda(),
+                inv_contraction=None,
+                voxel_size=voxel_size,
+                return_rgb=True
+            )
 
-        # Final return — PyTorch-native
         return verts, faces, rgbs
     
-    @torch.no_grad()
-    def extract_mesh_unbounded(self, resolution=1024):
+    def extract_mesh_unbounded(self, resolution=1024, factor=1):
         """
-        Experimental features, extracting meshes from unbounded scenes, not fully test across datasets. 
-        return o3d.mesh
+        Extract mesh from unbounded scene using factor to control volume extent.
         """
         def contract(x):
             mag = torch.linalg.norm(x, ord=2, dim=-1)[..., None]
             return torch.where(mag < 1, x, (2 - (1 / mag)) * (x / mag))
-        
+
         def uncontract(y):
             mag = torch.linalg.norm(y, ord=2, dim=-1)[..., None]
-            return torch.where(mag < 1, y, (1 / (2-mag) * (y/mag)))
+            return torch.where(mag < 1, y, (1 / (2 - mag)) * (y / mag))
 
         def compute_sdf_perframe(i, points, depthmap, rgbmap, viewpoint_cam):
-            """
-                compute per frame sdf
-            """
             new_points = torch.cat([points, torch.ones_like(points[...,:1])], dim=-1) @ viewpoint_cam.full_proj_transform
             z = new_points[..., -1:]
             pix_coords = (new_points[..., :2] / new_points[..., -1:])
-            mask_proj = ((pix_coords > -1. ) & (pix_coords < 1.) & (z > 0)).all(dim=-1)
-            sampled_depth = torch.nn.functional.grid_sample(depthmap.cuda()[None], pix_coords[None, None], mode='bilinear', padding_mode='border', align_corners=True).reshape(-1, 1)
-            sampled_rgb = torch.nn.functional.grid_sample(rgbmap.cuda()[None], pix_coords[None, None], mode='bilinear', padding_mode='border', align_corners=True).reshape(3,-1).T
-            sdf = (sampled_depth-z)
+            mask_proj = ((pix_coords > -1.) & (pix_coords < 1.) & (z > 0)).all(dim=-1)
+            sampled_depth = torch.nn.functional.grid_sample(
+                depthmap.cuda()[None], pix_coords[None, None], 
+                mode='bilinear', padding_mode='border', align_corners=True
+            ).reshape(-1, 1)
+            sampled_rgb = torch.nn.functional.grid_sample(
+                rgbmap.cuda()[None], pix_coords[None, None], 
+                mode='bilinear', padding_mode='border', align_corners=True
+            ).reshape(3, -1).T
+            sdf = (sampled_depth - z)
             return sdf, sampled_rgb, mask_proj
 
         def compute_unbounded_tsdf(samples, inv_contraction, voxel_size, return_rgb=False):
-            """
-                Fusion all frames, perform adaptive sdf_funcation on the contract spaces.
-            """
             if inv_contraction is not None:
                 mask = torch.linalg.norm(samples, dim=-1) > 1
-                # adaptive sdf_truncation
                 sdf_trunc = 5 * voxel_size * torch.ones_like(samples[:, 0])
-                sdf_trunc[mask] *= 1/(2-torch.linalg.norm(samples, dim=-1)[mask].clamp(max=1.9))
+                sdf_trunc[mask] *= 1 / (2 - torch.linalg.norm(samples, dim=-1)[mask].clamp(max=1.9))
                 samples = inv_contraction(samples)
             else:
                 sdf_trunc = 5 * voxel_size
 
-            tsdfs = torch.ones_like(samples[:,0]) * 1
-            rgbs = torch.zeros((samples.shape[0], 3)).cuda()
+            tsdfs = torch.ones_like(samples[:, 0], device='cuda')
+            rgbs = torch.zeros((samples.shape[0], 3), device='cuda')
+            weights = torch.ones_like(samples[:, 0], device='cuda')
 
-            weights = torch.ones_like(samples[:,0])
             for i, viewpoint_cam in tqdm(enumerate(self.viewpoint_stack), desc="TSDF integration progress"):
-                sdf, rgb, mask_proj = compute_sdf_perframe(i, samples,
-                    depthmap = self.depthmaps[i],
-                    rgbmap = self.rgbmaps[i],
+                sdf, rgb, mask_proj = compute_sdf_perframe(
+                    i, samples,
+                    depthmap=self.depthmaps[i],
+                    rgbmap=self.rgbmaps[i],
                     viewpoint_cam=self.viewpoint_stack[i],
                 )
-
-                # volume integration
                 sdf = sdf.flatten()
                 mask_proj = mask_proj & (sdf > -sdf_trunc)
                 sdf = torch.clamp(sdf / sdf_trunc, min=-1.0, max=1.0)[mask_proj]
                 w = weights[mask_proj]
                 wp = w + 1
                 tsdfs[mask_proj] = (tsdfs[mask_proj] * w + sdf) / wp
-                rgbs[mask_proj] = (rgbs[mask_proj] * w[:,None] + rgb[mask_proj]) / wp[:,None]
-                # update weight
+                rgbs[mask_proj] = (rgbs[mask_proj] * w[:, None] + rgb[mask_proj]) / wp[:, None]
                 weights[mask_proj] = wp
-            
+
             if return_rgb:
                 return tsdfs, rgbs
-
             return tsdfs
 
         normalize = lambda x: (x - self.center) / self.radius
         unnormalize = lambda x: (x * self.radius) + self.center
         inv_contraction = lambda x: unnormalize(uncontract(x))
 
+        # Scale the voxel size according to the desired volume extent
         N = resolution
-        voxel_size = (self.radius * 2 / N)
-        print(f"Computing sdf gird resolution {N} x {N} x {N}")
-        print(f"Define the voxel_size as {voxel_size}")
-        sdf_function = lambda x: compute_unbounded_tsdf(x, inv_contraction, voxel_size)
-        from utils.mcube_utils import marching_cubes_with_contraction, marching_cubes_with_contraction_diffdmc
-        R = contract(normalize(self.gaussians.get_xyz)).norm(dim=-1).cpu().numpy()
-        R = np.quantile(R, q=0.95)
-        R = min(R+0.01, 1.9)
+        volume_extent = self.radius * 2 * factor
+        voxel_size = volume_extent / N
 
-        mesh = marching_cubes_with_contraction_diffdmc(
+        print(f"Computing sdf grid resolution {N} x {N} x {N}")
+        print(f"Define the voxel_size as {voxel_size:.6f}")
+
+        sdf_function = lambda x: compute_unbounded_tsdf(x, inv_contraction, voxel_size)
+
+        from utils.mcube_utils import marching_cubes_with_contraction
+
+        # Compute R for bounding box
+        R = contract(normalize(self.gaussians.get_xyz)).norm(dim=-1).detach().cpu().numpy()
+        R = np.quantile(R, q=0.95)
+        R = min(R + 0.01, 1.9) #* factor  # ← factor applied here
+        
+        mesh = marching_cubes_with_contraction(
             sdf=sdf_function,
             bounding_box_min=(-R, -R, -R),
             bounding_box_max=(R, R, R),
@@ -529,28 +386,25 @@ class GaussianExtractor(object):
         )
 
         def trimesh_to_open3d(mesh: trimesh.Trimesh) -> o3d.geometry.TriangleMesh:
-            # Create an Open3D TriangleMesh object
             o3d_mesh = o3d.geometry.TriangleMesh()
-
-            # Set the vertices and triangles (faces)
             o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
             o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
-
-            # Optionally add normals if they exist
             if mesh.vertex_normals is not None:
                 o3d_mesh.vertex_normals = o3d.utility.Vector3dVector(mesh.vertex_normals)
-
             return o3d_mesh
 
         mesh = trimesh_to_open3d(mesh)
-        
-        # coloring the mesh
+
+        # Texture the mesh
         torch.cuda.empty_cache()
-        #mesh = mesh.as_open3d
         print("texturing mesh ... ")
-        _, rgbs = compute_unbounded_tsdf(torch.tensor(np.asarray(mesh.vertices)).float().cuda(), inv_contraction=None, voxel_size=voxel_size, return_rgb=True)
-        print(rgbs)
-        mesh.vertex_colors = o3d.utility.Vector3dVector(rgbs.cpu().numpy())
+        _, rgbs = compute_unbounded_tsdf(
+            torch.tensor(np.asarray(mesh.vertices)).float().cuda(),
+            inv_contraction=None,
+            voxel_size=voxel_size,
+            return_rgb=True
+        )
+        mesh.vertex_colors = o3d.utility.Vector3dVector(rgbs.detach().cpu().numpy())
         return mesh
 
     @torch.no_grad()
