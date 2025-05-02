@@ -121,9 +121,7 @@ class GaussianExtractor(object):
             depth = render_pkg['surf_depth']
             depth_normal = render_pkg['surf_normal']
             self.rgbmaps.append(rgb)
-            self.depthmaps.append(depth)
-            print("RECONSTRUCTION",  rgb.requires_grad)
-            
+            self.depthmaps.append(depth)           
         self.estimate_bounding_sphere()
 
     def estimate_bounding_sphere(self):
@@ -205,12 +203,12 @@ class GaussianExtractor(object):
                 depthmap[None], pix_coords[None, None], 
                 mode='bilinear', padding_mode='border', align_corners=True
             ).reshape(-1, 1)
-            sampled_rgb = torch.nn.functional.grid_sample(
-                rgbmap[None], pix_coords[None, None], 
-                mode='bilinear', padding_mode='border', align_corners=True
-            ).reshape(3, -1).T
+            with torch.no_grad():
+                sampled_rgb = torch.nn.functional.grid_sample(
+                    rgbmap[None], pix_coords[None, None], 
+                    mode='bilinear', padding_mode='border', align_corners=True
+                ).reshape(3, -1).T
             sdf = (sampled_depth - z)
-            print("SDF", depthmap.requires_grad, sampled_depth.requires_grad)
             return sdf, sampled_rgb, mask_proj
 
         def compute_unbounded_tsdf(samples, inv_contraction, voxel_size, return_rgb=False):
@@ -227,10 +225,14 @@ class GaussianExtractor(object):
             weights = torch.ones_like(samples[:, 0], device='cuda')
 
             for i, viewpoint_cam in tqdm(enumerate(self.viewpoint_stack), desc="TSDF integration progress"):
+                torch.cuda.empty_cache()
+                render = self.render(viewpoint_cam, self.gaussians)
                 sdf, rgb, mask_proj = compute_sdf_perframe(
                     i, samples,
+                    # depthmap=render['surf_depth'],
+                    # rgbmap=render['render'].detach(),
                     depthmap=self.depthmaps[i],
-                    rgbmap=self.rgbmaps[i],
+                    rgbmap=self.rgbmaps[i].detach(),
                     viewpoint_cam=viewpoint_cam,
                 )
                 sdf = sdf.flatten()
@@ -244,7 +246,6 @@ class GaussianExtractor(object):
 
             if return_rgb:
                 return tsdfs, rgbs
-            
             
             return tsdfs
 
@@ -261,7 +262,7 @@ class GaussianExtractor(object):
         print(f"Define the voxel_size as {voxel_size:.6f}")
 
         sdf_function = lambda x: compute_unbounded_tsdf(x, inv_contraction, voxel_size)
-
+        
         from utils.mcube_utils import marching_cubes_with_contraction
 
         # Compute R for bounding box
@@ -269,6 +270,8 @@ class GaussianExtractor(object):
         R = np.quantile(R, q=0.95)
         R = min(R + 0.01, 1.9) #* factor  # ← factor applied here
         
+        # Mesh
+        torch.cuda.empty_cache()
         verts, faces = marching_cubes_with_contraction(
             sdf=sdf_function,
             bounding_box_min=(-R, -R, -R),
@@ -278,6 +281,8 @@ class GaussianExtractor(object):
             inv_contraction=inv_contraction,
             return_mesh=False,
         )
+        
+        print(f"verts requires grad extract mesh unbounded: {verts.requires_grad}")
 
         # Texture
         torch.cuda.empty_cache()
@@ -285,12 +290,11 @@ class GaussianExtractor(object):
         # TODO lets not care about colors?
         with torch.no_grad():
             _, rgbs = compute_unbounded_tsdf(
-                verts.float().cuda(),
+                verts.detach().float().cuda(),
                 inv_contraction=None,
                 voxel_size=voxel_size,
                 return_rgb=True
             )
-
         return verts, faces, rgbs
     
     def extract_mesh_unbounded(self, resolution=1024, factor=1):

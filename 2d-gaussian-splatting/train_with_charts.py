@@ -474,7 +474,7 @@ def training(
         
         # Mesh regularization
         mesh_render_loss = 0
-        if True or iteration > 6900 and iteration % 5 == 0:
+        if iteration > 6900 and iteration % 5 == 0:
             # Mesh regularization
             print("[INFO] Extracting mesh...")
             device = 'cuda'
@@ -484,9 +484,9 @@ def training(
             verts, faces, vert_colors = gaussExtractor.extract_mesh_unbounded2(resolution=512)
             from matcha.dm_scene.meshes import Meshes, TexturesVertex
             p3d_mesh = Meshes(
-                verts=[verts.float().to(device)], 
-                faces=[faces.long().to(device)],
-                textures=TexturesVertex([vert_colors.float().to(device)]),
+                verts=[verts], 
+                faces=[faces.long()],
+                textures=TexturesVertex([vert_colors]),
             )
             scene_cameras = scene.getTrainCameras()
             from matcha.dm_scene.cameras import CamerasWrapper, GSCamera
@@ -509,7 +509,9 @@ def training(
             cameras_wrapper = CamerasWrapper(gs_cameras)
             
             from matcha.dm_scene.meshes import render_mesh_with_pytorch3d
+            
             result = render_mesh_with_pytorch3d(p3d_mesh, cameras_wrapper, 0)
+            
             import numpy as np
             aname = f"zzzzz{iteration}" + 'fuse_unbounded.ply'
             print("image saved at {}".format(os.path.join(os.getcwd(), aname.replace('.ply', '_rgb.png'))))
@@ -519,7 +521,10 @@ def training(
             result_image = result['rgb']
             gt_image = scene_cameras[0].original_image.permute(1, 2, 0)
             mesh_render_loss = torch.mean((result_image - gt_image) ** 2)
-            total_loss = mesh_render_loss
+            print(f"Verts requires grad:" , verts.requires_grad)
+            print(f"Mesh render loss: {mesh_render_loss.item()}")
+            print(f"mesh render requires grad: {mesh_render_loss.requires_grad}")
+            total_loss = total_loss + total_regularization_loss + 5 * mesh_render_loss
         else:  
             total_loss = total_loss + total_regularization_loss
         

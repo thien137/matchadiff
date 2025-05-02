@@ -49,6 +49,8 @@ def marching_cubes_with_contraction(
     for i in range(N):
         for j in range(N):
             for k in range(N):
+                torch.cuda.empty_cache()
+                
                 print(i, j, k)
                 x_min, x_max = xs[i], xs[i + 1]
                 y_min, y_max = ys[j], ys[j + 1]
@@ -59,16 +61,17 @@ def marching_cubes_with_contraction(
                 z = torch.linspace(z_min, z_max, cropN).cuda()
 
                 xx, yy, zz = torch.meshgrid(x, y, z, indexing="ij")
-                points = torch.tensor(torch.vstack([xx.ravel(), yy.ravel(), zz.ravel()]).T, dtype=torch.float).cuda()
+                points = torch.vstack([xx.ravel(), yy.ravel(), zz.ravel()]).T.float().cuda().requires_grad_(False)
 
                 from torch.utils.checkpoint import checkpoint
 
-                def evaluate(points, chunk=256**3, use_checkpoint=True):
+                def evaluate(points, chunk=256**3, use_checkpoint=False):
                     out = []
+                    dummy = torch.tensor(0.0, device=points.device, requires_grad=True)
 
                     for pnts in torch.split(points, chunk, dim=0):
                         if use_checkpoint:
-                            out.append(checkpoint(sdf, pnts))
+                            out.append(checkpoint(lambda pnts, _: sdf(pnts), pnts, dummy))
                         else:
                             out.append(sdf(pnts))
 
@@ -77,9 +80,9 @@ def marching_cubes_with_contraction(
                 # construct point pyramids
                 points = points.reshape(cropN, cropN, cropN, 3)
                 points = points.reshape(-1, 3)
-                pts_sdf = evaluate(points.contiguous())
-                z = pts_sdf.reshape(cropN, cropN, cropN).float().cuda()
+                z = evaluate(points.contiguous()).reshape(cropN, cropN, cropN).float().cuda()
                 if not (z.min() > level or z.max() < level):
+
                     verts, faces = diffdmc(z, normalize=False, return_quads=False)  # verts in [0, dim-1]
 
                     # Scale verts to world coordinates in this block
@@ -97,8 +100,6 @@ def marching_cubes_with_contraction(
                     verts_all.append(verts)
                     faces_all.append(faces)
                     vert_offset += verts.shape[0]
-                    
-                    print(verts.requires_grad)
                 
                 print("finished one block")
 
@@ -134,14 +135,5 @@ def marching_cubes_with_contraction(
     if inv_contraction is not None:
         verts_combined = inv_contraction(verts_combined.cuda())
         verts_combined = torch.clip(verts_combined, -max_range, max_range)
-        
-    if return_mesh:
-        import trimesh
-        mesh = trimesh.Trimesh(
-            vertices=verts_combined.detach().cpu().numpy(),
-            faces=faces_combined.detach().cpu().numpy(),
-            process=False,
-        )
-        return mesh
     
     return verts_combined, faces_combined
