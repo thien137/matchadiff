@@ -92,8 +92,9 @@ if __name__ == "__main__":
         
         # extract the mesh and save
         name = 'fuse_unbounded.ply'
-        verts, faces, vert_colors = gaussExtractor.extract_mesh_unbounded2(resolution=args.mesh_res)
-        device = 'cuda'
+        with torch.no_grad():
+            verts, faces, vert_colors = gaussExtractor.extract_mesh_unbounded2(resolution=args.mesh_res)
+            device = 'cuda'
         
         from matcha.dm_scene.meshes import Meshes, TexturesVertex
         p3d_mesh = Meshes(
@@ -102,53 +103,14 @@ if __name__ == "__main__":
             textures=TexturesVertex([vert_colors.float().to(device)]),
         )
         
-        scene_cameras = scene.getTrainCameras()
-        from matcha.dm_scene.cameras import CamerasWrapper, GSCamera
-        gs_cameras = []
-        for scene_camera in scene_cameras:
-            gs_cameras.append(GSCamera(
-                colmap_id=scene_camera.colmap_id,
-                R=scene_camera.R,
-                T=scene_camera.T,
-                FoVx=scene_camera.FoVx,
-                FoVy=scene_camera.FoVy,
-                image=scene_camera.original_image,
-                gt_alpha_mask=scene_camera.gt_alpha_mask,
-                image_name=scene_camera.image_name,
-                uid=scene_camera.uid,
-                data_device=scene_camera.data_device,
-                image_height=scene_camera.image_height,
-                image_width=scene_camera.image_width,
-            ))
-        cameras_wrapper = CamerasWrapper(gs_cameras)
-        from matcha.dm_scene.meshes import render_mesh_with_pytorch3d
-        
-        optimizer = torch.optim.Adam([verts], lr=1e-3)
-        steps = 10
-        for step in tqdm(range(steps)):
-            for i in range(len(scene_cameras)):            
-                result = render_mesh_with_pytorch3d(p3d_mesh, cameras_wrapper, i)
-                result_image = result['rgb']
-                gt_image = scene_cameras[i].original_image.permute(1, 2, 0)
-                loss = torch.mean((result_image - gt_image) ** 2)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                print(f"Step {step}, Loss: {loss.item()}")
-            # if step % 5 == 0:
-            #     with torch.no_grad():
-            #         result = render_mesh_with_pytorch3d(p3d_mesh, cameras_wrapper, 0)
-            #         # write rgb images
-            #         aname = f"zzzzz{step}" + name
-            #         print("image saved at {}".format(os.path.join(train_dir, aname.replace('.ply', '_rgb.png'))))
-            #         rgb_image = (result['rgb'].detach().cpu().numpy() * 255).astype(np.uint8)
-            #         from PIL import Image
-            #         Image.fromarray(rgb_image).save(os.path.join(train_dir, aname.replace('.ply', '_rgb.png')))
-                    #Image.fromarray((scene_cameras[0].original_image.permute(1, 2, 0) * 255).detach().cpu().numpy().astype(np.uint8)).save(os.path.join(train_dir, "original_" + aname.replace('.ply', '_original.png')))
-        
-        # o3d.io.write_triangle_mesh(os.path.join(train_dir, name), mesh)
-        # print("mesh saved at {}".format(os.path.join(train_dir, name)))
-        # # post-process the mesh and save, saving the largest N clusters
-        # mesh_post = post_process_mesh(mesh, cluster_to_keep=args.num_cluster)
-        # o3d.io.write_triangle_mesh(os.path.join(train_dir, name.replace('.ply', '_post.ply')), mesh_post)
-        # print("mesh post processed saved at {}".format(os.path.join(train_dir, name.replace('.ply', '_post.ply'))))
+        mesh = o3d.geometry.TriangleMesh()
+        mesh.vertices = o3d.utility.Vector3dVector(verts.cpu().numpy())
+        mesh.triangles = o3d.utility.Vector3iVector(faces.cpu().numpy())
+        mesh.vertex_colors = o3d.utility.Vector3dVector(vert_colors.cpu().numpy())
+    
+        o3d.io.write_triangle_mesh(os.path.join(train_dir, name), mesh)
+        print("mesh saved at {}".format(os.path.join(train_dir, name)))
+        # post-process the mesh and save, saving the largest N clusters
+        mesh_post = post_process_mesh(mesh, cluster_to_keep=args.num_cluster)
+        o3d.io.write_triangle_mesh(os.path.join(train_dir, name.replace('.ply', '_post.ply')), mesh_post)
+        print("mesh post processed saved at {}".format(os.path.join(train_dir, name.replace('.ply', '_post.ply'))))
