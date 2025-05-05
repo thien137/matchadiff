@@ -475,6 +475,8 @@ def training(
         # Mesh regularization
         mesh_render_loss = 0
         if iteration > 6000 and iteration % 25 == 0:
+            gc.collect()
+            torch.cuda.empty_cache()
             # Mesh regularization
             print("[INFO] Extracting mesh...")
             device = 'cuda'
@@ -526,6 +528,8 @@ def training(
             
             print(total_loss, total_regularization_loss, total_mesh_render_loss)
             total_loss = total_mesh_render_loss
+            gc.collect()
+            torch.cuda.empty_cache()
         else:  
             total_loss = total_loss + total_regularization_loss
         
