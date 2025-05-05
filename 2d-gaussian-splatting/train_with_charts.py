@@ -474,7 +474,7 @@ def training(
         
         # Mesh regularization
         mesh_render_loss = 0
-        if iteration > 6900 and iteration % 5 == 0:
+        if iteration > 6000 and iteration % 25 == 0:
             # Mesh regularization
             print("[INFO] Extracting mesh...")
             device = 'cuda'
@@ -509,22 +509,23 @@ def training(
             cameras_wrapper = CamerasWrapper(gs_cameras)
             
             from matcha.dm_scene.meshes import render_mesh_with_pytorch3d
-            
-            result = render_mesh_with_pytorch3d(p3d_mesh, cameras_wrapper, 0)
-            
-            import numpy as np
-            aname = f"zzzzz{iteration}" + 'fuse_unbounded.ply'
-            print("image saved at {}".format(os.path.join(os.getcwd(), aname.replace('.ply', '_rgb.png'))))
+            total_mesh_render_loss = 0
+            i = torch.randint(0, len(gs_cameras), (1,)).item()
+            print("CAMERA ID: ", i)
+            result = render_mesh_with_pytorch3d(p3d_mesh, cameras_wrapper, i)
             rgb_image = result['rgb']
+            gt_image = scene_cameras[i].original_image.permute(1, 2, 0)
+            total_mesh_render_loss += torch.mean((rgb_image - gt_image) ** 2)
+            # Save image
+            import numpy as np
+            aname = f"only_mesh{iteration}" + 'fuse_unbounded.ply'
+            print("image saved at {}".format(os.path.join(os.getcwd(), aname.replace('.ply', '_rgb.png'))))
             from PIL import Image
             Image.fromarray((rgb_image.detach().cpu().numpy() * 255).astype(np.uint8)).save(os.path.join(os.getcwd(), aname.replace('.ply', '_rgb.png')))
-            result_image = result['rgb']
-            gt_image = scene_cameras[0].original_image.permute(1, 2, 0)
-            mesh_render_loss = torch.mean((result_image - gt_image) ** 2)
-            print(f"Verts requires grad:" , verts.requires_grad)
-            print(f"Mesh render loss: {mesh_render_loss.item()}")
-            print(f"mesh render requires grad: {mesh_render_loss.requires_grad}")
-            total_loss = total_loss + total_regularization_loss + 5 * mesh_render_loss
+            total_mesh_render_loss /= len(gs_cameras)
+            
+            print(total_loss, total_regularization_loss, total_mesh_render_loss)
+            total_loss = total_mesh_render_loss
         else:  
             total_loss = total_loss + total_regularization_loss
         
